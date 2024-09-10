@@ -1,4 +1,4 @@
-### Chat-app 
+# Chat-app 
 Using websockets
 
 Planned features:
