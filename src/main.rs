@@ -1,47 +1,57 @@
+use tokio_tungstenite::{accept_async, WebSocketStream};
+use tokio_tungstenite::tungstenite::protocol::Message;
+use futures_util::{StreamExt, SinkExt, stream::SplitSink};
+use tokio::sync::mpsc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::accept_async;
-use futures_util::{StreamExt, SinkExt};
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-type Tx = tokio::sync::mpsc::UnboundedSender<String>;
-type PeerMap = Arc<Mutex<HashMap<String, Tx>>>;
+type Tx = tokio_tungstenite::tungstenite::protocol::Message;
+type PeerMap = Arc<Mutex<HashMap<String, Connection>>>;
+
+struct Connection {
+    tx: SplitSink<WebSocketStream<TcpStream>, Message>,
+    // Add other metadata here, e.g., connection status, last activity timestamp, etc.
+    status: usize,
+}
+
+fn generate_unique_id() -> String {
+    use uuid::Uuid;
+    Uuid::new_v4().to_string()
+}
 
 async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream) {
     let ws_stream = accept_async(raw_stream).await.expect("Error during websocket handshake");
-    let (mut write, mut read) = ws_stream.split();
-    let mut peers = peer_map.lock().unwrap();
-    let connection_id = generate_unique_id(); 
-    peers.insert(connection_id, (write, 0)); // Storing connection metadata
-    
-    println!("New WebSocket connection established with ID: {}", connection_id);
+    let (tx, mut rx) = ws_stream.split();
 
+    let connection_id = generate_unique_id();
+    let connection = Connection {
+        tx: tx,
+        status: 0, // Initialize status or other metadata
+    };
 
+    {
+        let mut peers = peer_map.lock().unwrap();
+        peers.insert(connection_id.clone(), connection);
+        println!("New WebSocket connection established with ID: {}", connection_id);
+    }
 
-    // Broadcast messages to all peers
-    while let Some(msg) = read.next().await {
-        let msg = match msg {
-            Ok(msg) => match msg.to_text() {
-                Ok(text) => text.to_string(), // Convert to String immediately
-                Err(e) => {
-                    eprintln!("Error converting message to text: {}", e);
-                    continue;
-                }
-            },
-            Err(e) => {
-                eprintln!("Error reading message: {}", e);
-                continue;
+    // Process messages
+    while let Some(msg) = rx.next().await {
+        match msg {
+            Ok(message) => {
+                println!("Received message: {:?}", message);
+                // Broadcast to other peers if needed
             }
-        };
-        println!("Received message: {}", msg);
-
-        // Broadcast the message to other clients
-        let peers = peer_map.lock().unwrap();
-        for (peer, tx) in peers.iter() {
-            if let Err(_) = tx.send(msg.to_string()) {
-                println!("Failed to send message to peer: {}", peer);
-            }
+            Err(e) => eprintln!("Error: {:?}", e),
         }
+    }
+
+    // Remove connection on disconnection
+    {
+        let mut peers = peer_map.lock().unwrap();
+        peers.remove(&connection_id);
+        println!("WebSocket connection with ID: {} closed", connection_id);
     }
 }
 
