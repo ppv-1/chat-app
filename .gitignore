@@ -1,0 +1,42 @@
+# Compiled files
+target/
+Cargo.lock
+
+# Rust build artifacts
+*.rs.bk
+*.d
+
+# Logs
+*.log
+
+# Dependency directories
+**/node_modules/
+**/bower_components/
+
+# IDE/editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+*.tmproj
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+*.pem
+
+# Other files
+*.db
+*.sqlite
+
+# Rust-specific
+*.rlib
+*.dSYM/
+*.exe
+*.pdb
+*.dSYM/
+*.dll
+*.so
+*.dylib
