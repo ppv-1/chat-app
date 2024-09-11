@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use tokio::io::{self, BufReader, AsyncBufReadExt};
+use chrono::Local;
 
 type PeerMap = Arc<Mutex<HashMap<String, Connection>>>;
 
@@ -21,6 +22,16 @@ fn generate_unique_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+fn format_message_with_timestamp( message: &Message) -> Message {
+    let timestamp = Local::now().format("[%Y-%m-%d %H:%M:%S]").to_string();
+    let formatted_message = match message {
+        Message::Text(text) => format!("{}: {}", timestamp, text),
+        Message::Close(_) => format!("{}: [Connection closed]", timestamp),
+        _ => format!("{}: non-text message", timestamp),
+    };
+    Message::Text(formatted_message)
+}
+
 async fn broadcast_message(peer_map: &PeerMap, sender_id: &str, message: Message) {
     let peers = peer_map.lock().await;  // Await the lock
 
@@ -28,8 +39,8 @@ async fn broadcast_message(peer_map: &PeerMap, sender_id: &str, message: Message
         if id != sender_id {
             let tx = peer.tx.clone();  // Clone Arc to share ownership
             let mut tx = tx.lock().await;
-
-            if let Err(e) = tx.send(message.clone()).await {
+            let timestamped_message = format_message_with_timestamp(&message);
+            if let Err(e) = tx.send(timestamped_message).await {
                 eprintln!("Failed to send message to {}: {:?}", id, e);
             }
         }
@@ -63,12 +74,12 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream) {
     while let Some(msg) = rx.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                println!("Received message from {}: {}", username, text);
+                println!(" {} {}", username, text);
                 broadcast_message(&peer_map, &connection_id, Message::Text(text)).await;
             }
             
             Ok(message) => {
-                println!("Received message from {}: {:?}", username, message);
+                println!(" {}: {:?}", username, message);
                 broadcast_message(&peer_map, &connection_id, message).await;
             }
             Err(e) => eprintln!("Error: {:?}", e),

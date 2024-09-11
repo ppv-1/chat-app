@@ -1,12 +1,12 @@
 use tokio_tungstenite::connect_async;
 use futures_util::{StreamExt, SinkExt};
 use tokio::io::{self, BufReader, AsyncBufReadExt};
-use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::protocol::Message;
+use chrono::Local;
 
 #[tokio::main]
 async fn main() {
-    let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
+    // let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
 
     // Connect to WebSocket and split into `write` and `read`
     let url = url::Url::parse("ws://127.0.0.1:8080").unwrap();
@@ -25,7 +25,11 @@ async fn main() {
     write.send(Message::Text(username.to_string())).await.unwrap();
     
 
-
+    fn format_message_with_timestamp(message: &str) -> Message {
+        let timestamp = Local::now().format("[%Y-%m-%d %H:%M:%S]").to_string();
+        let formatted_message = format!("{}: {}", timestamp, message);
+        Message::Text(formatted_message)
+    }
 
     // Task to read from stdin and send it to WebSocket
     tokio::spawn(async move {
@@ -38,27 +42,22 @@ async fn main() {
                 break; // End of input
             }
             let msg = line.trim().to_string();
-            stdin_tx.send(msg).unwrap(); // Send the message to the channel
+            if msg == "close" {
+                write.send(Message::Close(None)).await.unwrap();
+                break;
+            }
+            let timestamped_msg = format_message_with_timestamp( &msg);
+            write.send(timestamped_msg).await.unwrap();
             line.clear(); // Clear the buffer for the next line
         }
     });
 
-    // Task to send messages to WebSocket server
-    tokio::spawn(async move {
-        while let Some(msg) = stdin_rx.recv().await {
-            if msg.trim() == "close" {
-                write.send(Message::Close(None)).await.unwrap();
-                break;
-            }
-            write.send(Message::Text(msg)).await.unwrap();
-        }
-    });
 
     // Receive messages from the WebSocket server
     while let Some(Ok(msg)) = read.next().await {
         match msg {
             // Handle text messages
-            Message::Text(text) => println!("Server message: {}", text),
+            Message::Text(text) => println!("Server {}", text),
     
             Message::Close(_) => {
                 println!("Connection closed");
