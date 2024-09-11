@@ -2,9 +2,7 @@ use tokio_tungstenite::connect_async;
 use futures_util::{StreamExt, SinkExt};
 use tokio::io::{self, BufReader, AsyncBufReadExt};
 use tokio::sync::mpsc;
-use tokio::sync::Mutex; // Use tokio's async Mutex
 use tokio_tungstenite::tungstenite::protocol::Message;
-use std::sync::Arc; // Use Arc to share ownership
 
 #[tokio::main]
 async fn main() {
@@ -13,42 +11,60 @@ async fn main() {
     // Connect to WebSocket and split into `write` and `read`
     let url = url::Url::parse("ws://127.0.0.1:8080").unwrap();
     let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
-    let (write, mut read) = ws_stream.split();
+    let (mut write, mut read) = ws_stream.split();
 
-    // Wrap `write` in `Arc<Mutex<>>`
-    let write = Arc::new(Mutex::new(write));
-    let write_clone = write.clone();
+    // Create an async stdin reader using tokio's async system
+    let mut stdin = BufReader::new(io::stdin());
+
+    // Prompt user for a username
+    println!("Enter your username:");
+    let mut username = String::new();
+    stdin.read_line(&mut username).await.expect("Failed to read username");
+    let username = username.trim();
+
+    write.send(Message::Text(username.to_string())).await.unwrap();
+    
+
+
 
     // Task to read from stdin and send it to WebSocket
     tokio::spawn(async move {
-        let stdin = io::stdin();
-        let mut reader = BufReader::new(stdin);
         let mut line = String::new();
 
-        while let Ok(bytes) = reader.read_line(&mut line).await {
+        loop {
+            // Read input from stdin
+            let bytes = stdin.read_line(&mut line).await.expect("Failed to read line");
             if bytes == 0 {
                 break; // End of input
             }
-            stdin_tx.send(line.trim().to_string()).unwrap(); // Send the trimmed line to the channel
+            let msg = line.trim().to_string();
+            stdin_tx.send(msg).unwrap(); // Send the message to the channel
             line.clear(); // Clear the buffer for the next line
         }
     });
 
-    // Task to read from stdin channel and send to WebSocket server
+    // Task to send messages to WebSocket server
     tokio::spawn(async move {
         while let Some(msg) = stdin_rx.recv().await {
             if msg.trim() == "close" {
-                let mut write = write_clone.lock().await; // Lock the mutex to access `write`
                 write.send(Message::Close(None)).await.unwrap();
                 break;
             }
-            let mut write = write_clone.lock().await; // Lock the mutex to access `write`
-            write.send(msg.into()).await.unwrap();
+            write.send(Message::Text(msg)).await.unwrap();
         }
     });
 
     // Receive messages from the WebSocket server
     while let Some(Ok(msg)) = read.next().await {
-        println!("Received: {}", msg.to_text().unwrap());
+        match msg {
+            // Handle text messages
+            Message::Text(text) => println!("Server message: {}", text),
+    
+            Message::Close(_) => {
+                println!("Connection closed");
+                break; // Exit the loop if the server closes the connection
+            }
+            _ => println!("Received non-text message: {:?}", msg),
+        }
     }
 }

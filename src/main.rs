@@ -1,18 +1,19 @@
 use tokio_tungstenite::{accept_async, WebSocketStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use futures_util::{StreamExt, SinkExt, stream::SplitSink};
-use tokio::sync::mpsc;
+use futures_util::{StreamExt, SinkExt};
+use futures_util::stream::SplitSink;
 use tokio::net::{TcpListener, TcpStream};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex;
+use std::sync::Arc;
+use tokio::io::{self, BufReader, AsyncBufReadExt};
 
-type Tx = tokio_tungstenite::tungstenite::protocol::Message;
 type PeerMap = Arc<Mutex<HashMap<String, Connection>>>;
 
 struct Connection {
-    tx: SplitSink<WebSocketStream<TcpStream>, Message>,
-    // Add other metadata here, e.g., connection status, last activity timestamp, etc.
+    tx: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
     status: usize,
+    username: String,
 }
 
 fn generate_unique_id() -> String {
@@ -20,28 +21,55 @@ fn generate_unique_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+async fn broadcast_message(peer_map: &PeerMap, sender_id: &str, message: Message) {
+    let peers = peer_map.lock().await;  // Await the lock
+
+    for (id, peer) in peers.iter() {
+        if id != sender_id {
+            let tx = peer.tx.clone();  // Clone Arc to share ownership
+            let mut tx = tx.lock().await;
+
+            if let Err(e) = tx.send(message.clone()).await {
+                eprintln!("Failed to send message to {}: {:?}", id, e);
+            }
+        }
+    }
+}
+
 async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream) {
     let ws_stream = accept_async(raw_stream).await.expect("Error during websocket handshake");
     let (tx, mut rx) = ws_stream.split();
 
     let connection_id = generate_unique_id();
+    let username = if let Some(Ok(Message::Text(name))) = rx.next().await {
+        name
+    } else {
+        "Anonymous".to_string() // Default to "Anonymous" if username is not provided
+    };
+
     let connection = Connection {
-        tx: tx,
-        status: 0, // Initialize status or other metadata
+        tx: Arc::new(Mutex::new(tx)),
+        status: 0,
+        username: username.clone(),
     };
 
     {
-        let mut peers = peer_map.lock().unwrap();
+        let mut peers = peer_map.lock().await;  // Await the lock
         peers.insert(connection_id.clone(), connection);
-        println!("New WebSocket connection established with ID: {}", connection_id);
+        println!("New WebSocket connection established with ID: {} and Username: {}", connection_id, username);
     }
 
     // Process messages
     while let Some(msg) = rx.next().await {
         match msg {
+            Ok(Message::Text(text)) => {
+                println!("Received message from {}: {}", username, text);
+                broadcast_message(&peer_map, &connection_id, Message::Text(text)).await;
+            }
+            
             Ok(message) => {
-                println!("Received message: {:?}", message);
-                // Broadcast to other peers if needed
+                println!("Received message from {}: {:?}", username, message);
+                broadcast_message(&peer_map, &connection_id, message).await;
             }
             Err(e) => eprintln!("Error: {:?}", e),
         }
@@ -49,9 +77,9 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream) {
 
     // Remove connection on disconnection
     {
-        let mut peers = peer_map.lock().unwrap();
+        let mut peers = peer_map.lock().await;  // Await the lock
         peers.remove(&connection_id);
-        println!("WebSocket connection with ID: {} closed", connection_id);
+        println!("WebSocket connection with ID: {} closed with {}", connection_id, username);
     }
 }
 
@@ -64,6 +92,30 @@ async fn main() {
 
     let peer_map: PeerMap = Arc::new(Mutex::new(HashMap::new()));
 
+    // Spawn a task to handle terminal input
+    let peer_map_for_input = peer_map.clone();
+    tokio::spawn(async move {
+        let mut stdin = BufReader::new(io::stdin());
+        let mut line = String::new();
+        while let Ok(bytes) = stdin.read_line(&mut line).await {
+            if bytes == 0 {
+                break; // End of input
+            }
+            let msg = line.trim().to_string();
+            if msg == "close" {
+                println!("Closing server...");
+                // Handle server shutdown logic here
+                break;
+            } else {
+                // Broadcast the message to all connected peers
+                let message = Message::Text(msg);
+                broadcast_message(&peer_map_for_input, "", message).await;
+            }
+            line.clear(); // Clear the buffer for the next line
+        }
+    });
+
+    // Accept and handle WebSocket connections
     while let Ok((stream, _)) = listener.accept().await {
         let peer_map = peer_map.clone();
         tokio::spawn(async move {
